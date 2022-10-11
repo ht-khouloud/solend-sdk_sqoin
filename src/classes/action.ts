@@ -1,6 +1,8 @@
 import {
+  Account,
   Connection,
   PublicKey,
+  sendAndConfirmTransaction,
   SystemProgram,
   Transaction,
   TransactionInstruction,
@@ -37,11 +39,13 @@ import {
   refreshObligationInstruction,
   syncNative,
   depositObligationCollateralInstruction,
+  withdrawObligationCollateralInstruction,
 } from "../instructions";
 import { U64_MAX, WAD } from "./constants";
 import BigNumber from "bignumber.js";
 import { parseReserve } from "..";
 import axios from "axios";
+import { privateKey } from "./account";
 
 export const POSITION_LIMIT = 6;
 
@@ -173,6 +177,7 @@ export class SolendAction {
     lendingMarketAddress?: PublicKey,
     hostAta?: PublicKey
   ) {
+    const account = new Account(privateKey);
     const solendInfo = (await (
       await axios.get(`${API_ENDPOINT}/v1/config?deployment=${environment}`)
     ).data) as ConfigType;
@@ -185,61 +190,21 @@ export class SolendAction {
       solendInfo.markets[0];
 
     const seed = lendingMarket.address.slice(0, 32);
-
-    const obligationAddress = await PublicKey.createWithSeed(
-      publicKey,
-      seed,
-      new PublicKey(solendInfo.programID)
-    );
-
+    let info: any = []
     const reserve = lendingMarket.reserves.find((res) => res.asset === symbol);
     if (!reserve) {
       throw new Error(`Could not find asset ${symbol} in reserves`);
     }
+    let obligations: any = await SolendAction.getObligations();
 
-    const obligationAccountInfo = await connection.getAccountInfo(
-      obligationAddress
-    );
+    let getObligatioshasMinPosititon:any = await SolendAction.getObligatioshasMinPosititon(obligations, connection, action, reserve, info);
 
-    let obligationDetails = null;
-    const depositReserves: Array<PublicKey> = [];
-    const borrowReserves: Array<PublicKey> = [];
 
-    if (obligationAccountInfo) {
-      obligationDetails = parseObligation(
-        PublicKey.default,
-        obligationAccountInfo
-      )!.info;
+    console.log(getObligatioshasMinPosititon[0].obligationAddress, "getObligatioshasMinPosititon")
 
-      obligationDetails.deposits.forEach((deposit) => {
-        depositReserves.push(deposit.depositReserve);
-      });
+    //console.log(JSON.stringify(getObligatioshasMinPosititon.obligationAddress), "getObligatioshasMinPosititon")
 
-      obligationDetails.borrows.forEach((borrow) => {
-        borrowReserves.push(borrow.borrowReserve);
-      });
-    }
 
-    // Union of addresses
-    const distinctReserveCount =
-      [
-        ...new Set([
-          ...borrowReserves.map((e) => e.toBase58()),
-          ...(action === "borrow" ? [reserve.address] : []),
-        ]),
-      ].length +
-      [
-        ...new Set([
-          ...depositReserves.map((e) => e.toBase58()),
-          ...(action === "deposit" ? [reserve.address] : []),
-        ]),
-      ].length;
-
-    if (distinctReserveCount > POSITION_LIMIT) {
-      throw Error(
-        `Obligation already has max number of positions: ${POSITION_LIMIT}`
-      );
-    }
 
     const tokenInfo = getTokenInfo(symbol, solendInfo);
     const userTokenAccountAddress = await Token.getAssociatedTokenAddress(
@@ -254,28 +219,203 @@ export class SolendAction {
       new PublicKey(reserve.collateralMintAddress),
       publicKey
     );
-
-    return new SolendAction(
+if (getObligatioshasMinPosititon.length>0)
+{    return new SolendAction(
       solendInfo,
       connection,
       reserve,
       lendingMarket,
       tokenInfo,
       publicKey,
-      obligationAddress,
-      obligationDetails,
+     new PublicKey(getObligatioshasMinPosititon[0].obligationAddress) ,
+     getObligatioshasMinPosititon[0].obligationDetails,
+    
       userTokenAccountAddress,
       userCollateralAccountAddress,
       seed,
       symbol,
-      distinctReserveCount,
+      getObligatioshasMinPosititon[0].distinctReserveCount,
       amount,
-      depositReserves,
-      borrowReserves,
+      getObligatioshasMinPosititon[0].depositReserves,
+      getObligatioshasMinPosititon[0].borrowReserves,
       hostAta
     );
+  }else{
+      const owner = new Account(privateKey);
+await SolendAction.initTNX(connection,owner,new PublicKey(lendingMarket.address) ,        new PublicKey(solendInfo.programID))
+let ax:any= await SolendAction.initialize(
+  action,
+  amount,
+  symbol,
+  publicKey,
+  connection,
+  environment,
+  lendingMarketAddress,
+  hostAta
+)
+return ax
+    }
+  }
+  private static async getObligatioshasMinPosititon(obligations: any, connection: Connection, action: string, reserve: ReserveType, info: any) {
+
+    return new Promise(async (resolve, reject) => {
+console.log(obligations,"obligations", typeof obligations)
+    const promises = obligations.map((obligationAddress: any) => {
+      return new Promise(async (resolve, reject) => {
+
+        const obligationAccountInfo = await connection.getAccountInfo(
+          new PublicKey(obligationAddress)
+        );
+
+        let obligationDetails = null;
+        const depositReserves: Array<PublicKey> = [];
+        const borrowReserves: Array<PublicKey> = [];
+
+        if (obligationAccountInfo) {
+          obligationDetails = parseObligation(
+            PublicKey.default,
+            obligationAccountInfo
+          )!.info;
+
+
+          obligationDetails.deposits.forEach((deposit) =>
+
+            depositReserves.push(deposit.depositReserve)
+          );
+
+          obligationDetails.borrows.forEach((borrow) =>
+
+            borrowReserves.push(borrow.borrowReserve)
+          );
+        }
+
+        // Union of addresses
+        const distinctReserveCount = [
+          ...new Set([
+            ...borrowReserves.map((e) => e.toBase58()),
+            ...(action === "borrow" ? [reserve.address] : []),
+          ]),
+        ].length +
+          [
+            ...new Set([
+              ...depositReserves.map((e) => e.toBase58()),
+              ...(action === "deposit" ? [reserve.address] : []),
+            ]),
+          ].length;
+
+
+        let details: any
+        if (distinctReserveCount < 6) {
+          details = {
+            distinctReserveCount: distinctReserveCount,
+            borrowReserves: borrowReserves,
+            depositReserves: depositReserves,
+            obligationAddress: obligationAddress,
+            obligationDetails: obligationDetails
+          };
+       
+          resolve(details);
+        } else { resolve(undefined); }
+
+
+
+
+
+      })
+
+
+    }).filter((element: any, index: any, originlArray: any[]) => {
+      let ind = originlArray.indexOf(element);
+      if (ind != index)
+        return false;
+      return true;
+    });
+    let data = await Promise.all(promises);
+data=data.filter(element=>element)
+    console.log({ data });
+    console.log(data, "data");
+    resolve(data)
+  });
   }
 
+  private static async getObligations() {
+    return new Promise(async (resolve, reject) => {
+      await axios.get('https://api.solend.fi/liquidity-mining/external-reward-score-v2?wallet=vqjaEKwZVk3eMa1c8i8PRmFpWrZLoK6xX1CdBxjFYuv').then(async (resp: any) => {
+        if (!Array.isArray(resp.data))
+          return;
+        /*       let arrayOfobligationIDSet = new Set()
+              resp.data.forEach((element: any) => {
+                arrayOfobligationIDSet.add(element.obligationID)
+        
+              })
+              console.log(arrayOfobligationIDSet,"arrayOfobligationIDSet") */
+        let arrayOfobligationID = resp.data.map((element: any) => {
+          return element.obligationID;
+        }).filter((element: any, index: any, originlArray: any[]) => {
+          let ind = originlArray.indexOf(element);
+          if (ind != index)
+            return false;
+          return true;
+        });
+        console.log(arrayOfobligationID, "arrayOfobligationID");
+
+        const promises = arrayOfobligationID.map((obligation: any) => {
+          return new Promise((resolve, reject) => {
+
+            axios.get('https://api.solend.fi/history-v2?obligation=' + obligation).then((resp: any) => {
+
+              if (resp.data.results.length > 0) {
+                resolve(obligation);
+
+              }
+              resolve(null);
+            }).catch(error => {
+              console.log(error);
+              resolve("");
+            });
+
+          });
+        });
+        const data = await Promise.all(promises);
+        const final = data.filter(element => element);
+        console.log({ final });
+        resolve(final)
+      });
+
+    });
+  }
+
+  static async initTNX(
+    connection: Connection, owner: Account, lendingMarket: PublicKey, obligationProgramID: PublicKey
+  ) {
+
+    let obligation = new Account();
+
+    const obligationAccountInfoRentExempt =
+      await connection.getMinimumBalanceForRentExemption(
+        OBLIGATION_SIZE
+      );
+    let instruction = new Transaction()
+    instruction.add((
+      SystemProgram.createAccount({
+        fromPubkey: owner.publicKey,
+        newAccountPubkey: obligation.publicKey,
+        lamports: obligationAccountInfoRentExempt,
+        space: OBLIGATION_SIZE,
+        programId: obligationProgramID,
+      })
+    ));
+    const initObligationIx = initObligationInstruction(
+      obligation.publicKey,
+      lendingMarket,
+      owner.publicKey,
+      obligationProgramID
+    );
+    instruction.add(initObligationIx)
+    let tx = await sendAndConfirmTransaction(connection, instruction, [owner, obligation])
+
+    return tx;
+  }
   static async buildDepositTxns(
     connection: Connection,
     amount: string | BN,
@@ -284,6 +424,7 @@ export class SolendAction {
     environment: "production" | "devnet" = "production",
     lendingMarketAddress?: PublicKey
   ) {
+
     const axn = await SolendAction.initialize(
       "deposit",
       amount,
@@ -342,8 +483,8 @@ export class SolendAction {
       environment,
       lendingMarketAddress
     );
-    await axn.addSupportIxs("mint");
-    await axn.addDepositReserveLiquidityIx();
+      await axn.addSupportIxs("mint");
+      await axn.addDepositReserveLiquidityIx();
     return axn;
   }
 
@@ -391,7 +532,7 @@ export class SolendAction {
     return axn;
   }
 
-  static async buildWithdrawTxns(
+  static async buildwithdrawObligationCollateralTxns(
     connection: Connection,
     amount: string | BN,
     symbol: string,
@@ -414,7 +555,86 @@ export class SolendAction {
 
     return axn;
   }
+  static async buildwithdrawObligationCollateralAndRedeemReserveLiquidityTxns(
+    connection: Connection,
+    amount: string | BN,
+    symbol: string,
+    publicKey: PublicKey,
+    environment: "production" | "devnet" = "production",
+    lendingMarketAddress?: PublicKey
+  ) {
+    const axn = await SolendAction.initialize(
+      "withdraw",
+      amount,
+      symbol,
+      publicKey,
+      connection,
+      environment,
+      lendingMarketAddress
+    );
 
+    await axn.addSupportIxs("withdraw");
+    await axn.addWithdrawObligationCollateralAndRedeemReserveLiquidityIx();
+
+    return axn;
+  }
+
+
+  async addWithdrawObligationCollateralAndRedeemReserveLiquidityIx() {
+    const buffer = await this.connection.getAccountInfo(
+      new PublicKey(this.reserve.address),
+      "processed"
+    );
+
+    if (!buffer) {
+      throw Error(`Unable to fetch reserve data for ${this.reserve.asset}`);
+    }
+
+    const parsedData = parseReserve(
+      new PublicKey(this.reserve.address),
+      buffer
+    )?.info;
+
+    if (!parsedData) {
+      throw Error(`Unable to parse data of reserve ${this.reserve.asset}`);
+    }
+
+    const totalBorrowsWads = parsedData.liquidity.borrowedAmountWads;
+    const totalLiquidityWads = parsedData.liquidity.availableAmount.mul(
+      new BN(WAD)
+    );
+    const totalDepositsWads = totalBorrowsWads.add(totalLiquidityWads);
+    const cTokenExchangeRate = new BigNumber(totalDepositsWads.toString())
+      .div(parsedData.collateral.mintTotalSupply.toString())
+      .div(WAD);
+
+    this.lendingIxs.push(
+      withdrawObligationCollateralAndRedeemReserveLiquidity(
+        this.amount.eq(new BN(U64_MAX))
+          ? this.amount
+          : new BN(
+            new BigNumber(this.amount.toString())
+              .dividedBy(cTokenExchangeRate)
+              .integerValue(BigNumber.ROUND_FLOOR)
+              .toString()
+          ),
+        new PublicKey(this.reserve.collateralSupplyAddress),
+        this.userCollateralAccountAddress,
+        new PublicKey(this.reserve.address),
+        this.obligationAddress,
+        new PublicKey(this.lendingMarket.address),
+        new PublicKey(this.lendingMarket.authorityAddress),
+        this.userTokenAccountAddress, // destinationLiquidity
+        new PublicKey(this.reserve.collateralMintAddress),
+        new PublicKey(this.reserve.liquidityAddress),
+        this.publicKey, // obligationOwner
+        this.publicKey, // transferAuthority
+        new PublicKey(this.solendInfo.programID)
+      )
+    );
+
+
+  }
   static async buildRepayTxns(
     connection: Connection,
     amount: string | BN,
@@ -625,27 +845,51 @@ export class SolendAction {
       .div(parsedData.collateral.mintTotalSupply.toString())
       .div(WAD);
 
+    /*   this.lendingIxs.push(
+        withdrawObligationCollateralAndRedeemReserveLiquidity(
+          this.amount.eq(new BN(U64_MAX))
+            ? this.amount
+            : new BN(
+                new BigNumber(this.amount.toString())
+                  .dividedBy(cTokenExchangeRate)
+                  .integerValue(BigNumber.ROUND_FLOOR)
+                  .toString()
+              ),
+          new PublicKey(this.reserve.collateralSupplyAddress),
+          this.userCollateralAccountAddress,
+          new PublicKey(this.reserve.address),
+          this.obligationAddress,
+          new PublicKey(this.lendingMarket.address),
+          new PublicKey(this.lendingMarket.authorityAddress),
+          this.userTokenAccountAddress, // destinationLiquidity
+          new PublicKey(this.reserve.collateralMintAddress),
+          new PublicKey(this.reserve.liquidityAddress),
+          this.publicKey, // obligationOwner
+          this.publicKey, // transferAuthority
+          new PublicKey(this.solendInfo.programID)
+        )
+      ); */
+
+
     this.lendingIxs.push(
-      withdrawObligationCollateralAndRedeemReserveLiquidity(
+      withdrawObligationCollateralInstruction(
         this.amount.eq(new BN(U64_MAX))
           ? this.amount
           : new BN(
-              new BigNumber(this.amount.toString())
-                .dividedBy(cTokenExchangeRate)
-                .integerValue(BigNumber.ROUND_FLOOR)
-                .toString()
-            ),
+            new BigNumber(this.amount.toString())
+              .dividedBy(cTokenExchangeRate)
+              .integerValue(BigNumber.ROUND_FLOOR)
+              .toString()
+          ),
         new PublicKey(this.reserve.collateralSupplyAddress),
         this.userCollateralAccountAddress,
         new PublicKey(this.reserve.address),
         this.obligationAddress,
         new PublicKey(this.lendingMarket.address),
         new PublicKey(this.lendingMarket.authorityAddress),
-        this.userTokenAccountAddress, // destinationLiquidity
-        new PublicKey(this.reserve.collateralMintAddress),
-        new PublicKey(this.reserve.liquidityAddress),
+
         this.publicKey, // obligationOwner
-        this.publicKey, // transferAuthority
+        // transferAuthority
         new PublicKey(this.solendInfo.programID)
       )
     );
@@ -667,6 +911,7 @@ export class SolendAction {
   }
 
   async addSupportIxs(action: ActionType) {
+
     if (["withdraw", "borrow"].includes(action)) {
       await this.addRefreshIxs();
     }
